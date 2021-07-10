@@ -16,11 +16,12 @@ uses
 var
   tcIniFile: string;
   pluginIniFile: string;
-  rootName: string;
+  rootName: string = 'AnyFS';
   ProgressProc: TProgressProcW;
   LogProc: TLogProcW;
   RequestProc: TRequestProcW;
   TCPluginNr: Integer;
+  nodePath: string;
 
 
 type
@@ -51,8 +52,6 @@ type
 function FileTime64ToDateTime(AFileTime: FILETIME): TDateTime;
 var
   li: ULARGE_INTEGER;
-  systemTime: TSystemTime;
-  localTime: TSystemTime;
 const
   OA_ZERO_TICKS = UInt64(94353120000000000);
   TICKS_PER_DAY = UInt64(864000000000);
@@ -67,8 +66,6 @@ end;
 function DateTimeToFileTime64(ADateTimeUTC: TDateTime): FILETIME;
 var
     li: ULARGE_INTEGER;
-    systemTime: TSystemTime;
-    localTime: TSystemTime;
 const
     OA_ZERO_TICKS = UInt64(94353120000000000);
     TICKS_PER_DAY = UInt64(864000000000);
@@ -86,6 +83,11 @@ begin
   FillChar(szFileName, SizeOf(szFileName), #0);
   GetModuleFileNameW(hInstance, szFileName, MAX_PATH);
   Result := string(WideString(szFileName));
+end;
+
+function isPathAbsolute(const path: string): Boolean;
+begin
+  Result := (Length(path) > 1) and (path[1] = DirectorySeparator) or (Length(path) > 2) and (path[2] = ':');
 end;
 
 function GetPluginIniFileName: string;
@@ -112,24 +114,26 @@ begin
 end;
 
 
-function ExecuteScript(args: TRawByteStringArray): string;
+function ExecuteScript(scriptDir: string; args: TRawByteStringArray): string;
 var
-  dir: TProcessString;
+  dir, curDir: TProcessString;
 begin
+  curDir := ExtractFileDir(GetModuleName);
+  if isPathAbsolute(scriptDir) then
+    dir := scriptDir
+  else
+    dir := curDir + DirectorySeparator + scriptDir;
   Insert('index.js', args, 0);
-  dir := ExtractFileDir(GetModuleName) + DirectorySeparator;
   if not RunCommandInDir(
-    dir + rootName,
-    dir + 'node.exe',
+    dir,
+    nodePath,
     args,
     Result,
     [poNoConsole],
     swoNone
     )
   then
-  begin
     raise Exception.Create('Failed running script');
-  end;
 end;
 
 function GetJsonArrayFromOutput(const output: string): TJSONData;
@@ -144,32 +148,6 @@ begin
   end;
 end;
 
-
-
-procedure FsSetDefaultParams(const dps: TFsDefaultParamStruct); stdcall;
-begin
-  tcIniFile := string(AnsiString(dps.DefaultIniName));
-  rootName := GetRootName;
-  //MessageBox(0, PChar('THandle: ' + IntToStr(SizeOf(THandle)) + ' Integer: ' + IntToStr(SizeOf(Integer)) + ' Pointer: ' + IntToStr(SizeOf(Pointer))), 'Sizes', 0);
-end;
-
-procedure FsGetDefRootName(aDefRootName: PAnsiChar; aMaxLen: Integer); stdcall;
-var
-  s: AnsiString;
-begin
-  s := AnsiString(rootName);
-  if Length(s) >= aMaxLen then
-    s := Copy(s, 1, aMaxLen - 1);
-  Move(s[1], aDefRootName^, Length(s));
-end;
-
-function FsInitW(PluginNr: Integer; pProgressProcW: tProgressProcW; pLogProcW: tLogProcW; pRequestProcW: tRequestProcW): Integer; stdcall;
-begin
-  ProgressProc := pProgressProcW;
-  LogProc := pLogProcW;
-  RequestProc := pRequestProcW;
-  TCPluginNr := PluginNr;
-end;
 
 function ProcessContentsEntry(var contents: TDirectoryContents; var aFindDataW: tWIN32FINDDATAW): Boolean;
 var
@@ -231,9 +209,64 @@ begin
   Freemem(contents);
 end;
 
+function GetAddonPath(const path: string; var addon: string; var addonDir: string): string;
+var
+  list: TStringList;
+begin
+  // Adjust path for addon
+  list := TStringList.Create;
+  try
+    list.LineBreak := '\';
+    list.Text := path;
+    addon := list.Strings[1];
+    list.Delete(1); // Remove the addon name from the path
+    Result := list.Text;
+  finally
+    list.Free;
+  end;
+
+  // Read addon directory
+  SetLength(addonDir, 1000);
+  SetLength(addonDir, GetPrivateProfileStringA('Addons', PChar(addon), PChar(addon), @addonDir[1], Length(addonDir), PChar(GetPluginIniFileName)));
+end;
+
+
+// ================= TC functions =========================
+
+
+procedure FsSetDefaultParams(const dps: TFsDefaultParamStruct); stdcall;
+begin
+  tcIniFile := string(AnsiString(dps.DefaultIniName));
+end;
+
+procedure FsGetDefRootName(aDefRootName: PAnsiChar; aMaxLen: Integer); stdcall;
+var
+  s: AnsiString;
+begin
+  s := AnsiString(rootName);
+  Move(s[1], aDefRootName^, Length(s));
+end;
+
+function FsInitW(PluginNr: Integer; pProgressProcW: tProgressProcW; pLogProcW: tLogProcW; pRequestProcW: tRequestProcW): Integer; stdcall;
+var
+  s: string;
+begin
+  ProgressProc := pProgressProcW;
+  LogProc := pLogProcW;
+  RequestProc := pRequestProcW;
+  TCPluginNr := PluginNr;
+  SetLength(s, 1000);
+  SetLength(s, GetPrivateProfileStringA('AnyFS', 'NodeJs', 'node.exe', @s[1], Length(s), PChar(GetPluginIniFileName)));
+  if isPathAbsolute(s) then
+    nodePath := s
+  else
+    nodePath := ExtractFilePath(GetModuleName) + s;
+  Result := 0;
+end;
+
 function FsFindFirstW(aPath: PWideChar; var FindData: tWIN32FINDDATAW): PDirectoryContents; stdcall;
 var
-  output: string;
+  path, output, addon, buf, scriptDir: string;
   i, itemsCount, dirsCount: Integer;
   jOutput: TJSONData;
   jData: TJSONArray;
@@ -241,10 +274,54 @@ var
   fil: TFile;
   jItem: TJSONObject;
   time: Int64;
+  list: TStringList;
 begin
   FillChar(FindData, SizeOf(FindData), 0);
+  path := string(WideString(aPath));
+  if path = '\' then
+  begin
+    // Enumerate available addons in root
+    SetLength(buf, 10000);
+    SetLength(buf, GetPrivateProfileSectionA('Addons', @buf[1], Length(buf), PChar(GetPluginIniFileName)));
+    list := TStringList.Create;
+    try
+      list.Text := buf;
+      if list.Count > 0 then
+      begin
+        Result := GetMem(SizeOf(Result^));
+        FillChar(Result^, SizeOf(Result^), 0);
+        SetLength(Result^.dirs, list.Count);
+        for i := 0 to list.Count - 1 do
+        begin
+          dir := TDirectory.Create;
+          dir.fName := list.Values[list.Names[i]];
+          Result^.dirs[i] := dir;
+        end;
+        ProcessContentsEntry(Result^, FindData);
+      end
+      else
+      begin
+        SetLastError(ERROR_NO_MORE_FILES);
+        Result := Pointer(INVALID_HANDLE_VALUE);
+      end;
+    finally
+      list.Free;
+    end;
+    exit;
+  end;
+
   try
-    output := ExecuteScript(['ReadDirectory', string(WideString(aPath))]);
+    path := GetAddonPath(path, addon, scriptDir);
+  except
+    SetLastError(ERROR_BAD_DEVICE);
+    Result := Pointer(INVALID_HANDLE_VALUE);
+    exit;
+  end;
+  //MessageBox(0, PChar(output), 'output', 0);
+
+  // Execute addon
+  try
+    output := ExecuteScript(scriptDir, ['ReadDirectory', path]);
   except
     SetLastError(ERROR_BAD_DEVICE);
     Result := Pointer(INVALID_HANDLE_VALUE);
@@ -318,8 +395,8 @@ begin
       exit;
     end;
   end;
-  SetLastError(18);
-  Result := Pointer(-1);
+  SetLastError(ERROR_NO_MORE_FILES);
+  Result := Pointer(INVALID_HANDLE_VALUE);
 end;
 
 function FsFindNextW(contents: PDirectoryContents; var aFindDataW: tWIN32FINDDATAW): BOOL; stdcall;
@@ -335,7 +412,7 @@ end;
 
 function FsGetFileW(aRemoteName, aLocalName: PWideChar; aCopyFlags: Integer; aRemoteInfo: PRemoteInfo): Integer; stdcall;
 var
-  output, flags, jErr: string;
+  output, flags, jErr, scriptDir, addon: string;
   jOutput: TJSONData;
   jObj: TJSONObject;
   data: RawByteString;
@@ -346,6 +423,8 @@ begin
   try
     remoteName := aRemoteName;
     localName := aLocalName;
+    remoteName := GetAddonPath(remoteName, addon, scriptDir);
+
     flags := '';
     if aCopyFlags and not FS_COPYFLAGS_OVERWRITE = FS_COPYFLAGS_OVERWRITE then
       flags := flags + 'overwrite,';
@@ -355,7 +434,7 @@ begin
       Delete(flags, Length(flags), 1);
 
     try
-      output := ExecuteScript(['GetFile', string(remoteName), string(localName), flags]);
+      output := ExecuteScript(scriptDir, ['GetFile', string(remoteName), string(localName), flags]);
     except
       Result := FS_FILE_READERROR;
       exit;
@@ -427,6 +506,6 @@ exports
 {$R *.res}
 
 begin
-  rootName := '';
+  //MessageBox(0, PChar('THandle: ' + IntToStr(SizeOf(THandle)) + ' Integer: ' + IntToStr(SizeOf(Integer)) + ' Pointer: ' + IntToStr(SizeOf(Pointer))), 'Sizes', 0);
 end.
 

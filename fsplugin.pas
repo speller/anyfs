@@ -1,4 +1,29 @@
-E=8;
+unit fsplugin;    {Plugin definitions version 2.1}
+
+interface
+
+uses windows;
+
+{ ids for FsGetFile }
+const FS_FILE_OK=0;
+      FS_FILE_EXISTS=1;
+      FS_FILE_NOTFOUND=2;
+      FS_FILE_READERROR=3;
+      FS_FILE_WRITEERROR=4;
+      FS_FILE_USERABORT=5;
+      FS_FILE_NOTSUPPORTED=6;
+      FS_FILE_EXISTSRESUMEALLOWED=7;
+
+      FS_EXEC_OK=0;
+      FS_EXEC_ERROR=1;
+      FS_EXEC_YOURSELF=-1;
+      FS_EXEC_SYMLINK=-2;
+
+      FS_COPYFLAGS_OVERWRITE=1;
+      FS_COPYFLAGS_RESUME=2;
+
+      FS_COPYFLAGS_MOVE=4;
+      FS_COPYFLAGS_EXISTS_SAMECASE=8;
       FS_COPYFLAGS_EXISTS_DIFFERENTCASE=16;
 
 { flags for tRequestProc }
