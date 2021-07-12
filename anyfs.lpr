@@ -21,7 +21,6 @@ var
   LogProc: TLogProcW;
   RequestProc: TRequestProcW;
   TCPluginNr: Integer;
-  nodePath: string;
 
 
 type
@@ -108,15 +107,30 @@ begin
   Result := tcIniFile;
 end;
 
-function GetRootName: string;
+function AddSlash(const s: string): string;
 begin
-  Result := ChangeFileExt(ExtractFileName(GetModuleName), '');
+  Result := s;
+  if (Length(Result) > 0) and (Result[Length(Result)] = '\') then
+    Result := Result + '\';
 end;
 
+function GetAddonExe(const addon: string): string;
+begin
+  SetLength(Result, 1100);
+  SetLength(Result, GetPrivateProfileStringA(PChar(addon), 'Interpreter', 'node.exe', @Result[1], Length(Result), PChar(GetPluginIniFileName)));
+  if not isPathAbsolute(Result) then
+    Result := ExtractFilePath(GetModuleName) + Result;
+end;
 
-function ExecuteScript(scriptDir: string; args: TRawByteStringArray): string;
+function GetAddonAddSlash(const addon: string): Boolean;
+begin
+  Result := GetPrivateProfileIntA(PChar(addon), 'AddTrailingSlash', 1, PChar(GetPluginIniFileName)) > 0;
+end;
+
+function ExecuteScript(const addon, scriptDir: string; args: TRawByteStringArray): string;
 var
   dir, curDir: TProcessString;
+  i: Integer;
 begin
   curDir := ExtractFileDir(GetModuleName);
   if isPathAbsolute(scriptDir) then
@@ -124,15 +138,18 @@ begin
   else
     dir := curDir + DirectorySeparator + scriptDir;
   Insert('index.js', args, 0);
+  if GetAddonAddSlash(addon) then
+    for i := 0 to Length(args) - 1 do
+      args[i] := AddSlash(args[i]);
+
   if not RunCommandInDir(
     dir,
-    nodePath,
+    GetAddonExe(addon),
     args,
     Result,
     [poNoConsole],
     swoNone
-    )
-  then
+  ) then
     raise Exception.Create('Failed running script');
 end;
 
@@ -220,6 +237,7 @@ begin
     list.Text := path;
     addon := list.Strings[1];
     list.Delete(1); // Remove the addon name from the path
+    list.SkipLastLineBreak := (Length(path) > 0) and (path[Length(path)] <> '\');
     Result := list.Text;
   finally
     list.Free;
@@ -255,12 +273,6 @@ begin
   LogProc := pLogProcW;
   RequestProc := pRequestProcW;
   TCPluginNr := PluginNr;
-  SetLength(s, 1000);
-  SetLength(s, GetPrivateProfileStringA('AnyFS', 'NodeJs', 'node.exe', @s[1], Length(s), PChar(GetPluginIniFileName)));
-  if isPathAbsolute(s) then
-    nodePath := s
-  else
-    nodePath := ExtractFilePath(GetModuleName) + s;
   Result := 0;
 end;
 
@@ -321,7 +333,7 @@ begin
 
   // Execute addon
   try
-    output := ExecuteScript(scriptDir, ['ReadDirectory', path]);
+    output := ExecuteScript(addon, scriptDir, ['ReadDirectory', path]);
   except
     SetLastError(ERROR_BAD_DEVICE);
     Result := Pointer(INVALID_HANDLE_VALUE);
@@ -434,7 +446,7 @@ begin
       Delete(flags, Length(flags), 1);
 
     try
-      output := ExecuteScript(scriptDir, ['GetFile', string(remoteName), string(localName), flags]);
+      output := ExecuteScript(addon, scriptDir, ['GetFile', string(remoteName), string(localName), flags]);
     except
       Result := FS_FILE_READERROR;
       exit;
